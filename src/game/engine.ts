@@ -24,10 +24,18 @@ import {
   drawHeightRuler,
   drawActionPreviewOnCanvas,
 } from './sprites'
+import {
+  checkFootRubberBandCollision,
+  getActionCollisionQuality,
+  drawCollisionDebug,
+  GROUND_Y as PHYSICS_GROUND_Y,
+  CANVAS_W as PHYSICS_CANVAS_W,
+} from './physics'
 
-const CANVAS_W = 960
+const CANVAS_W = PHYSICS_CANVAS_W
 const CANVAS_H = 540
-const GROUND_Y = 440
+const GROUND_Y = PHYSICS_GROUND_Y
+const SHOW_COLLISION_DEBUG = false
 
 export class GameEngine {
   canvas: HTMLCanvasElement
@@ -49,6 +57,13 @@ export class GameEngine {
   actionTimer: number = 0
   playerActionDuration: number = 0
   levelResults: LevelResult[] = []
+  private pendingAction: {
+    action: ActionType
+    startTime: number
+    resolved: boolean
+    bestDistance: number
+    bestCollision: boolean
+  } | null = null
 
   onStateChange: ((state: GameState) => void) | null = null
   onLevelComplete: ((result: LevelResult) => void) | null = null
@@ -183,6 +198,7 @@ export class GameEngine {
     this.feedbacks = []
     this.levelResults = []
     this.currentLevelConfig = null
+    this.pendingAction = null
     this.emitStateChange()
   }
 
@@ -219,81 +235,107 @@ export class GameEngine {
     this.state.goodCount = 0
     this.state.missCount = 0
     this.state.combo = 0
+    this.pendingAction = null
   }
 
   private processAction(action: ActionType) {
     if (!this.currentLevelConfig) return
+    if (this.pendingAction && !this.pendingAction.resolved) return
 
     const expectedAction = this.currentLevelConfig.actions[this.state.actionIndex]
     if (!expectedAction) return
 
-    if (action === expectedAction) {
-      const elapsed = performance.now() - this.state.lastActionTime
-      const timeRatio = elapsed / this.currentLevelConfig.timePerAction
-      let grade: ActionGrade
-      let scoreAdd: number
-      let feedbackText: string
-      let feedbackColor: string
+    this.playActionAnimation(action)
 
-      if (timeRatio < 0.3) {
-        grade = 'perfect'
-        scoreAdd = 100
-        feedbackText = '完美!'
-        feedbackColor = '#FFD700'
-        this.state.perfectCount++
-        this.spawnPerfectParticles()
-      } else if (timeRatio < 0.7) {
-        grade = 'good'
-        scoreAdd = 60
-        feedbackText = '不错!'
-        feedbackColor = '#4CAF50'
-        this.state.goodCount++
-      } else {
-        grade = 'good'
-        scoreAdd = 30
-        feedbackText = '可以!'
-        feedbackColor = '#2196F3'
-        this.state.goodCount++
-      }
+    if (action !== expectedAction) {
+      this.handleMiss('动作错误')
+      return
+    }
 
-      this.state.combo++
-      if (this.state.combo > this.state.maxCombo) {
-        this.state.maxCombo = this.state.combo
-      }
-      const comboBonus = Math.floor(this.state.combo / 3) * 20
-      this.state.score += scoreAdd + comboBonus
+    this.pendingAction = {
+      action,
+      startTime: performance.now(),
+      resolved: false,
+      bestDistance: Infinity,
+      bestCollision: false,
+    }
+  }
 
-      this.playActionAnimation(action)
+  private resolvePendingAction() {
+    if (!this.pendingAction || this.pendingAction.resolved) return
+    if (!this.currentLevelConfig) return
 
-      this.feedbacks.push({
-        grade,
-        x: this.player.x,
-        y: GROUND_Y - this.player.jumpHeight - 80,
-        opacity: 1,
-        scale: 1.2,
-        text: feedbackText + (comboBonus > 0 ? ` +${comboBonus}` : ''),
-        color: feedbackColor,
-      })
+    this.pendingAction.resolved = true
 
-      this.rubberBand.wobble = 15
-      this.state.actionIndex++
-      this.state.lastActionTime = performance.now()
-      this.state.actionTimer = this.currentLevelConfig.timePerAction
+    const { action, startTime, bestCollision, bestDistance } = this.pendingAction
+    this.pendingAction = null
 
-      if (this.state.actionIndex >= this.currentLevelConfig.actions.length) {
-        this.completeLevel()
-      }
+    if (!bestCollision) {
+      this.handleMiss('未触碰到皮筋')
+      return
+    }
+
+    const quality = getActionCollisionQuality(bestDistance, action)
+    const elapsed = performance.now() - startTime
+    const timeRatio = elapsed / this.currentLevelConfig.timePerAction
+
+    let grade: ActionGrade
+    let scoreAdd: number
+    let feedbackText: string
+    let feedbackColor: string
+
+    if (quality === 'perfect' && timeRatio < 0.6) {
+      grade = 'perfect'
+      scoreAdd = 120
+      feedbackText = '完美!'
+      feedbackColor = '#FFD700'
+      this.state.perfectCount++
+      this.spawnPerfectParticles()
+    } else if (quality === 'perfect' || quality === 'good') {
+      grade = 'good'
+      scoreAdd = 70
+      feedbackText = '不错!'
+      feedbackColor = '#4CAF50'
+      this.state.goodCount++
     } else {
-      this.handleMiss()
+      this.handleMiss('距离过远')
+      return
+    }
+
+    this.state.combo++
+    if (this.state.combo > this.state.maxCombo) {
+      this.state.maxCombo = this.state.combo
+    }
+    const comboBonus = Math.floor(this.state.combo / 3) * 20
+    this.state.score += scoreAdd + comboBonus
+
+    this.feedbacks.push({
+      grade,
+      x: this.player.x,
+      y: GROUND_Y - this.player.jumpHeight - 80,
+      opacity: 1,
+      scale: 1.2,
+      text: feedbackText + ` +${scoreAdd + comboBonus}`,
+      color: feedbackColor,
+    })
+
+    this.rubberBand.wobble = 15
+    this.state.actionIndex++
+    this.state.lastActionTime = performance.now()
+    this.state.actionTimer = this.currentLevelConfig.timePerAction
+
+    if (this.state.actionIndex >= this.currentLevelConfig.actions.length) {
+      this.completeLevel()
     }
 
     this.emitStateChange()
   }
 
-  private handleMiss() {
+  private handleMiss(reason?: string) {
     this.state.missCount++
     this.state.combo = 0
     this.state.lives--
+    this.pendingAction = null
 
     this.feedbacks.push({
       grade: 'miss',
@@ -301,7 +343,7 @@ export class GameEngine {
       y: GROUND_Y - 80,
       opacity: 1,
       scale: 1,
-      text: '失误!',
+      text: reason ? `失误:${reason}` : '失误!',
       color: '#F44336',
     })
 
@@ -315,6 +357,7 @@ export class GameEngine {
 
     this.state.lastActionTime = performance.now()
     this.state.actionTimer = this.currentLevelConfig!.timePerAction
+    this.emitStateChange()
   }
 
   private completeLevel() {
@@ -481,9 +524,7 @@ export class GameEngine {
     if (!this.currentLevelConfig) return
     this.state.actionTimer -= dt
     if (this.state.actionTimer <= 0) {
-      this.handleMiss()
-      this.state.actionTimer = this.currentLevelConfig.timePerAction
-      this.state.lastActionTime = performance.now()
+      this.handleMiss('超时')
     }
   }
 
@@ -491,10 +532,30 @@ export class GameEngine {
     if (this.player.state !== 'idle') {
       this.playerActionDuration -= dt
       this.player.animProgress = Math.min(this.player.animProgress + dt * 0.003, 1)
+
+      if (this.pendingAction && !this.pendingAction.resolved) {
+        const currentTime = performance.now()
+        const collision = checkFootRubberBandCollision(
+          this.player,
+          this.rubberBand,
+          this.pendingAction.action,
+          currentTime
+        )
+        if (collision.distance < this.pendingAction.bestDistance) {
+          this.pendingAction.bestDistance = collision.distance
+        }
+        if (collision.collided) {
+          this.pendingAction.bestCollision = true
+        }
+      }
+
       if (this.playerActionDuration <= 0) {
         this.player.state = 'idle'
         this.player.animProgress = 0
         this.playerActionDuration = 0
+        if (this.pendingAction && !this.pendingAction.resolved) {
+          this.resolvePendingAction()
+        }
       }
     }
   }
@@ -545,11 +606,11 @@ export class GameEngine {
 
     drawBackground(ctx, time, this.clouds)
 
-    this.rubberBand.leftX = this.leftAssistant.x + 25
-    this.rubberBand.rightX = this.rightAssistant.x - 25
+    const leftHand = drawAssistant(ctx, this.leftAssistant, this.currentLevelConfig?.assistantArmAngle ?? -10, this.rubberBand.y)
+    const rightHand = drawAssistant(ctx, this.rightAssistant, this.currentLevelConfig?.assistantArmAngle ?? -10, this.rubberBand.y)
 
-    drawAssistant(ctx, this.leftAssistant, this.currentLevelConfig?.assistantArmAngle ?? -10, this.rubberBand.y)
-    drawAssistant(ctx, this.rightAssistant, this.currentLevelConfig?.assistantArmAngle ?? -10, this.rubberBand.y)
+    this.rubberBand.leftX = leftHand.handX
+    this.rubberBand.rightX = rightHand.handX
 
     drawRubberBand(ctx, this.rubberBand, time)
 

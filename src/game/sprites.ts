@@ -98,7 +98,7 @@ export function drawRubberBand(ctx: CanvasRenderingContext2D, band: RubberBandSt
   ctx.restore()
 }
 
-export function drawAssistant(ctx: CanvasRenderingContext2D, char: CharacterRenderState, armTargetAngle: number, bandY: number) {
+export function drawAssistant(ctx: CanvasRenderingContext2D, char: CharacterRenderState, armTargetAngle: number, _bandY: number) {
   const x = char.x
   const baseY = GROUND_Y
   const headR = 18
@@ -156,25 +156,33 @@ export function drawAssistant(ctx: CanvasRenderingContext2D, char: CharacterRend
   ctx.stroke()
 
   const shoulderY = bodyTop + 8
-  const bandLocalY = bandY - baseY
+  const armLen = 40
   const dirX = char.facingRight ? 1 : -1
-  const armTargetX = dirX * 30
-  const armTargetYLocal = bandLocalY
+  const shoulderX = dirX * bodyW / 2
+
+  const angleRad = (armTargetAngle * Math.PI) / 180
+  const handLocalX = shoulderX + Math.sin(angleRad) * armLen * dirX
+  const handLocalY = shoulderY - Math.cos(angleRad) * armLen
 
   ctx.strokeStyle = '#FFCC80'
   ctx.lineWidth = 6
   ctx.lineCap = 'round'
   ctx.beginPath()
-  ctx.moveTo(dirX * bodyW / 2, shoulderY)
-  ctx.lineTo(armTargetX, armTargetYLocal)
+  ctx.moveTo(shoulderX, shoulderY)
+  ctx.lineTo(handLocalX, handLocalY)
   ctx.stroke()
 
   ctx.fillStyle = '#FFCC80'
   ctx.beginPath()
-  ctx.arc(armTargetX, armTargetYLocal, 4, 0, Math.PI * 2)
+  ctx.arc(handLocalX, handLocalY, 4, 0, Math.PI * 2)
   ctx.fill()
 
   ctx.restore()
+
+  return {
+    handX: x + handLocalX,
+    handY: baseY + handLocalY,
+  }
 }
 
 export function drawPlayer(ctx: CanvasRenderingContext2D, char: CharacterRenderState, time: number) {

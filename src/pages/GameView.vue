@@ -104,17 +104,20 @@ import { GameEngine } from '@/game/engine'
 import { getLevelConfig } from '@/game/levels'
 import { ACTION_DEFS } from '@/game/actions'
 import { useStorage } from '@/composables/useStorage'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import HUD from '@/components/HUD.vue'
 import ActionHint from '@/components/ActionHint.vue'
 import VirtualControls from '@/components/VirtualControls.vue'
 
-const props = defineProps<{
-  difficulty: Difficulty
-}>()
-
+const route = useRoute()
 const router = useRouter()
 const { saveHighScore } = useStorage()
+
+const currentDifficulty = computed<Difficulty>(() => {
+  const d = route.query.difficulty as string
+  if (d === 'easy' || d === 'normal' || d === 'hard') return d
+  return 'normal'
+})
 
 const canvasRef = ref<HTMLCanvasElement | null>(null)
 let engine: GameEngine | null = null
@@ -131,7 +134,7 @@ const gameState = reactive<GameState>({
   perfectCount: 0,
   goodCount: 0,
   missCount: 0,
-  difficulty: props.difficulty,
+  difficulty: currentDifficulty.value,
   lastActionTime: 0,
   actionTimer: 0,
 })
@@ -144,7 +147,7 @@ const showLevelComplete = ref(false)
 const showGameOver = ref(false)
 
 const currentLevelLabel = computed(() => {
-  const config = getLevelConfig(gameState.currentLevel, props.difficulty)
+  const config = getLevelConfig(gameState.currentLevel, currentDifficulty.value)
   return config.heightLabel
 })
 
@@ -154,7 +157,7 @@ onMounted(() => {
   canvas.width = 960
   canvas.height = 540
 
-  const eng = new GameEngine(canvas, props.difficulty)
+  const eng = new GameEngine(canvas, currentDifficulty.value)
 
   eng.onStateChange = (state: GameState) => {
     Object.assign(gameState, state)
@@ -171,7 +174,7 @@ onMounted(() => {
     gameResult.value = result
     showGameOver.value = true
     saveHighScore({
-      difficulty: props.difficulty,
+      difficulty: currentDifficulty.value,
       score: result.totalScore,
       level: result.levelsCompleted,
       date: new Date().toISOString(),
@@ -214,7 +217,7 @@ function goNextLevel() {
 function retryGame() {
   showGameOver.value = false
   gameResult.value = null
-  router.replace({ name: 'game', query: { difficulty: props.difficulty } })
+  router.replace({ name: 'game', query: { difficulty: currentDifficulty.value } })
 }
 
 function goHome() {
