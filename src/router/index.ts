@@ -12,6 +12,21 @@ const routes = [
     name: 'game',
     component: () => import('@/pages/GameView.vue'),
   },
+  {
+    path: '/tutorial',
+    name: 'tutorial',
+    component: () => import('@/pages/TutorialView.vue'),
+  },
+  {
+    path: '/competition',
+    name: 'competition',
+    component: () => import('@/pages/CompetitionView.vue'),
+  },
+  {
+    path: '/editor',
+    name: 'editor',
+    component: () => import('@/pages/PatternEditor.vue'),
+  },
 ]
 
 const router = createRouter({

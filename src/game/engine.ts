@@ -11,6 +11,13 @@ import type {
   LevelResult,
   GameResult,
   ActionGrade,
+  GameMode,
+  PlayerInfo,
+  RhythmGrade,
+  RoutineDef,
+  CustomPattern,
+  TutorialConfig,
+  TutorialStep,
 } from '@/types/game'
 import { getLevelConfig, getTotalLevels } from './levels'
 import { ACTION_DEFS, getKeyActionMap } from './actions'
@@ -30,12 +37,25 @@ import {
   drawCollisionDebug,
   GROUND_Y as PHYSICS_GROUND_Y,
   CANVAS_W as PHYSICS_CANVAS_W,
+  applyElasticCollision,
+  updateElasticBand,
+  judgeRhythm,
+  getBeatPosition,
+  DEFAULT_RHYTHM_CONFIG,
+  getHeightObstacle,
+  checkJumpHeight,
 } from './physics'
+import { AIAssistant } from './ai'
+import { TutorialEngine } from './tutorial'
+import { getRoutineById } from './routines'
 
 const CANVAS_W = PHYSICS_CANVAS_W
 const CANVAS_H = 540
 const GROUND_Y = PHYSICS_GROUND_Y
 const SHOW_COLLISION_DEBUG = false
+
+const PLAYER_COLORS = ['#FF6B35', '#4CAF50', '#2196F3', '#9C27B0']
+const PLAYER_NAMES = ['玩家1', '玩家2', '玩家3', '玩家4']
 
 export class GameEngine {
   canvas: HTMLCanvasElement
@@ -65,20 +85,34 @@ export class GameEngine {
     bestCollision: boolean
   } | null = null
 
+  gameMode: GameMode = 'classic'
+  players: PlayerInfo[] = []
+  currentPlayerIndex: number = 0
+  aiAssistant: AIAssistant | null = null
+  tutorialEngine: TutorialEngine | null = null
+  currentRoutine: RoutineDef | null = null
+  customPattern: CustomPattern | null = null
+  rhythmConfig = DEFAULT_RHYTHM_CONFIG
+  beatTime: number = 0
+  actionHistory: ActionType[] = []
+
   onStateChange: ((state: GameState) => void) | null = null
   onLevelComplete: ((result: LevelResult) => void) | null = null
   onGameOver: ((result: GameResult) => void) | null = null
+  onPlayerSwitch: ((player: PlayerInfo) => void) | null = null
+  onTutorialStepComplete: ((step: TutorialStep) => void) | null = null
 
   keyActionMap: Record<string, ActionType>
 
   private touchActionHandler: ((action: ActionType) => void) | null = null
 
-  constructor(canvas: HTMLCanvasElement, difficulty: Difficulty) {
+  constructor(canvas: HTMLCanvasElement, difficulty: Difficulty, mode?: GameMode) {
     this.canvas = canvas
     this.canvas.width = CANVAS_W
     this.canvas.height = CANVAS_H
     this.ctx = canvas.getContext('2d')!
     this.difficulty = difficulty
+    this.gameMode = mode ?? 'classic'
     this.keyActionMap = getKeyActionMap()
 
     this.state = this.createInitialState(difficulty)
@@ -89,6 +123,12 @@ export class GameEngine {
     this.clouds = this.createClouds()
     this.particles = []
     this.feedbacks = []
+
+    if (this.gameMode === 'tutorial') {
+      this.setupTutorial()
+    } else if (this.gameMode === 'competition') {
+      this.setupCompetition()
+    }
   }
 
   private createInitialState(difficulty: Difficulty): GameState {
@@ -107,6 +147,11 @@ export class GameEngine {
       difficulty,
       lastActionTime: 0,
       actionTimer: 0,
+      gameMode: this.gameMode,
+      currentPlayerIndex: 0,
+      rhythmGrade: 'miss',
+      bandElasticity: 0.15,
+      bandRecoilForce: 0,
     }
   }
 
@@ -120,6 +165,7 @@ export class GameEngine {
       jumpHeight: 0,
       legAngle: 0,
       armAngle: 0,
+      isAI: false,
     }
   }
 
@@ -133,6 +179,7 @@ export class GameEngine {
       jumpHeight: 0,
       legAngle: 0,
       armAngle: 0,
+      isAI: false,
     }
   }
 
@@ -145,6 +192,10 @@ export class GameEngine {
       wobble: 0,
       wobbleSpeed: 0.15,
       wobbleDecay: 0.97,
+      elasticity: 0.15,
+      recoilForce: 0,
+      stretchX: 0,
+      velocity: 0,
     }
   }
 
@@ -162,11 +213,131 @@ export class GameEngine {
     return clouds
   }
 
-  start() {
-    this.loadLevel(this.state.currentLevel)
+  loadRoutine(routineId: string) {
+    const routine = getRoutineById(routineId)
+    if (!routine) return
+    this.currentRoutine = routine
+    this.gameMode = 'routine'
+    this.state.gameMode = 'routine'
+    this.state.actionIndex = 0
+    this.state.actionTimer = routine.timePerAction
+    this.state.lastActionTime = performance.now()
+    this.rubberBand.targetY = routine.rubberBandY
+    this.leftAssistant.armAngle = routine.assistantArmAngle
+    this.rightAssistant.armAngle = routine.assistantArmAngle
+    this.state.perfectCount = 0
+    this.state.goodCount = 0
+    this.state.missCount = 0
+    this.state.combo = 0
+    this.pendingAction = null
+  }
+
+  loadCustomPattern(pattern: CustomPattern) {
+    this.customPattern = pattern
+    this.gameMode = 'custom'
+    this.state.gameMode = 'custom'
+    this.state.actionIndex = 0
+    this.state.actionTimer = pattern.timePerAction
+    this.state.lastActionTime = performance.now()
+    this.state.perfectCount = 0
+    this.state.goodCount = 0
+    this.state.missCount = 0
+    this.state.combo = 0
+    this.pendingAction = null
+  }
+
+  setupMultiplayer(playerCount: number) {
+    const count = Math.max(2, Math.min(4, playerCount))
+    this.gameMode = 'multiplayer'
+    this.state.gameMode = 'multiplayer'
+    this.players = []
+    for (let i = 0; i < count; i++) {
+      this.players.push({
+        id: i,
+        name: PLAYER_NAMES[i],
+        color: PLAYER_COLORS[i],
+        score: 0,
+        lives: this.difficulty === 'easy' ? 8 : this.difficulty === 'hard' ? 3 : 5,
+        combo: 0,
+        maxCombo: 0,
+        perfectCount: 0,
+        goodCount: 0,
+        missCount: 0,
+        actionIndex: 0,
+        isActive: i === 0,
+      })
+    }
+    this.currentPlayerIndex = 0
+    this.state.currentPlayerIndex = 0
+  }
+
+  setupTutorial() {
+    this.gameMode = 'tutorial'
+    this.state.gameMode = 'tutorial'
+    this.tutorialEngine = new TutorialEngine()
+    this.aiAssistant = new AIAssistant(this.difficulty)
+  }
+
+  setupCompetition() {
+    this.gameMode = 'competition'
+    this.state.gameMode = 'competition'
+    this.aiAssistant = new AIAssistant(this.difficulty)
+  }
+
+  switchToNextPlayer() {
+    if (this.gameMode !== 'multiplayer' || this.players.length === 0) return
+    this.players[this.currentPlayerIndex].isActive = false
+    this.currentPlayerIndex = (this.currentPlayerIndex + 1) % this.players.length
+    this.players[this.currentPlayerIndex].isActive = true
+    this.state.currentPlayerIndex = this.currentPlayerIndex
+
+    const player = this.players[this.currentPlayerIndex]
+    this.state.score = player.score
+    this.state.lives = player.lives
+    this.state.combo = player.combo
+    this.state.maxCombo = player.maxCombo
+    this.state.perfectCount = player.perfectCount
+    this.state.goodCount = player.goodCount
+    this.state.missCount = player.missCount
+    this.state.actionIndex = player.actionIndex
+
+    if (this.onPlayerSwitch) {
+      this.onPlayerSwitch(player)
+    }
+  }
+
+  getAIPrediction(): ActionType | null {
+    if (!this.aiAssistant) return null
+    return this.aiAssistant.predictNextAction(this.actionHistory)
+  }
+
+  start(mode?: GameMode) {
+    if (mode) {
+      this.gameMode = mode
+      this.state.gameMode = mode
+    }
+
+    if (this.gameMode === 'routine' && this.currentRoutine) {
+      this.loadLevel(this.state.currentLevel)
+    } else if (this.gameMode === 'custom' && this.customPattern) {
+      this.state.actionIndex = 0
+      this.state.actionTimer = this.customPattern.timePerAction
+      this.state.lastActionTime = performance.now()
+      this.state.perfectCount = 0
+      this.state.goodCount = 0
+      this.state.missCount = 0
+      this.state.combo = 0
+      this.pendingAction = null
+    } else if (this.gameMode === 'tutorial') {
+      this.setupTutorial()
+    } else {
+      this.loadLevel(this.state.currentLevel)
+    }
+
     this.state.phase = 'playing'
     this.state.lastActionTime = performance.now()
-    this.state.actionTimer = this.currentLevelConfig!.timePerAction
+    this.state.actionTimer = this.currentLevelConfig?.timePerAction ?? 3000
+    this.beatTime = performance.now()
     this.emitStateChange()
     this.lastTime = performance.now()
     this.gameLoop(this.lastTime)
@@ -199,6 +370,10 @@ export class GameEngine {
     this.levelResults = []
     this.currentLevelConfig = null
     this.pendingAction = null
+    this.currentRoutine = null
+    this.customPattern = null
+    this.actionHistory = []
+    this.beatTime = 0
     this.emitStateChange()
   }
 
@@ -239,11 +414,24 @@ export class GameEngine {
   }
 
   private processAction(action: ActionType) {
-    if (!this.currentLevelConfig) return
+    if (!this.currentLevelConfig && !this.currentRoutine && !this.customPattern) return
     if (this.pendingAction && !this.pendingAction.resolved) return
 
-    const expectedAction = this.currentLevelConfig.actions[this.state.actionIndex]
+    let expectedAction: ActionType | undefined
+    if (this.gameMode === 'routine' && this.currentRoutine) {
+      expectedAction = this.currentRoutine.actions[this.state.actionIndex]
+    } else if (this.gameMode === 'custom' && this.customPattern) {
+      expectedAction = this.customPattern.actions[this.state.actionIndex]
+    } else if (this.currentLevelConfig) {
+      expectedAction = this.currentLevelConfig.actions[this.state.actionIndex]
+    }
+
     if (!expectedAction) return
+
+    const actionTime = performance.now()
+    const closestBeat = this.beatTime > 0 ? actionTime : actionTime
+    const rhythmGrade = judgeRhythm(actionTime, closestBeat, this.rhythmConfig)
+    this.state.rhythmGrade = rhythmGrade
 
     this.playActionAnimation(action)
 
@@ -259,11 +447,12 @@ export class GameEngine {
       bestDistance: Infinity,
       bestCollision: false,
     }
+
+    this.actionHistory.push(action)
   }
 
   private resolvePendingAction() {
     if (!this.pendingAction || this.pendingAction.resolved) return
-    if (!this.currentLevelConfig) return
 
     this.pendingAction.resolved = true
 
@@ -275,14 +464,30 @@ export class GameEngine {
       return
     }
 
+    if (bestCollision) {
+      const elasticBand = applyElasticCollision(this.rubberBand, this.rubberBand.recoilForce + 1, action)
+      this.rubberBand.elasticity = elasticBand.elasticity
+      this.rubberBand.recoilForce = elasticBand.recoilForce
+      this.rubberBand.stretchX = elasticBand.stretchX
+      this.rubberBand.velocity = elasticBand.velocity
+      this.rubberBand.wobble = elasticBand.wobble
+      this.rubberBand.wobbleSpeed = elasticBand.wobbleSpeed
+    }
+
     const quality = getActionCollisionQuality(bestDistance, action)
+    const timePerAction = this.getTimePerAction()
     const elapsed = performance.now() - startTime
-    const timeRatio = elapsed / this.currentLevelConfig.timePerAction
+    const timeRatio = elapsed / timePerAction
 
     let grade: ActionGrade
     let scoreAdd: number
     let feedbackText: string
     let feedbackColor: string
+
+    const rhythmMultiplier = this.state.rhythmGrade === 'perfect' ? 1.5
+      : this.state.rhythmGrade === 'good' ? 1.2
+      : this.state.rhythmGrade === 'early' || this.state.rhythmGrade === 'late' ? 0.8
+      : 1.0
 
     if (quality === 'perfect' && timeRatio < 0.6) {
       grade = 'perfect'
@@ -307,7 +512,8 @@ export class GameEngine {
       this.state.maxCombo = this.state.combo
     }
     const comboBonus = Math.floor(this.state.combo / 3) * 20
-    this.state.score += scoreAdd + comboBonus
+    const finalScore = Math.floor((scoreAdd + comboBonus) * rhythmMultiplier)
+    this.state.score += finalScore
 
     this.feedbacks.push({
       grade,
@@ -315,16 +521,32 @@ export class GameEngine {
       y: GROUND_Y - this.player.jumpHeight - 80,
       opacity: 1,
       scale: 1.2,
-      text: feedbackText + ` +${scoreAdd + comboBonus}`,
+      text: feedbackText + ` +${finalScore}`,
       color: feedbackColor,
     })
 
     this.rubberBand.wobble = 15
     this.state.actionIndex++
     this.state.lastActionTime = performance.now()
-    this.state.actionTimer = this.currentLevelConfig.timePerAction
+    this.state.actionTimer = timePerAction
 
-    if (this.state.actionIndex >= this.currentLevelConfig.actions.length) {
+    if (this.gameMode === 'tutorial' && this.tutorialEngine) {
+      this.tutorialEngine.recordPractice(true)
+      if (this.tutorialEngine.isStepComplete()) {
+        if (this.onTutorialStepComplete) {
+          const step = this.tutorialEngine.getCurrentStep()
+          if (step) this.onTutorialStepComplete(step)
+        }
+        this.tutorialEngine.advanceStep()
+      }
+    }
+
+    if (this.gameMode === 'multiplayer') {
+      this.syncCurrentPlayerState()
+    }
+
+    const totalActions = this.getTotalActions()
+    if (totalActions > 0 && this.state.actionIndex >= totalActions) {
       this.completeLevel()
     }
 
@@ -349,14 +571,23 @@ export class GameEngine {
 
     this.spawnMissParticles()
 
+    if (this.gameMode === 'tutorial' && this.tutorialEngine) {
+      this.tutorialEngine.recordPractice(false)
+    }
+
+    if (this.gameMode === 'multiplayer') {
+      this.syncCurrentPlayerState()
+      this.switchToNextPlayer()
+    }
+
     if (this.state.lives <= 0) {
       this.gameOver(false)
-    } else if (this.state.missCount >= (this.currentLevelConfig?.maxMistakes ?? 5)) {
+    } else if (this.state.missCount >= this.getMaxMistakes()) {
       this.gameOver(false)
     }
 
     this.state.lastActionTime = performance.now()
-    this.state.actionTimer = this.currentLevelConfig!.timePerAction
+    this.state.actionTimer = this.getTimePerAction()
     this.emitStateChange()
   }
 
@@ -375,6 +606,24 @@ export class GameEngine {
     this.state.score += 200 * this.state.currentLevel
 
     this.spawnCelebrationParticles()
+
+    if (this.gameMode === 'routine' || this.gameMode === 'custom' || this.gameMode === 'tutorial') {
+      this.state.phase = 'victory'
+      cancelAnimationFrame(this.animFrameId)
+      this.emitStateChange()
+      if (this.onGameOver) {
+        this.onGameOver({
+          totalScore: this.state.score,
+          levelsCompleted: this.state.currentLevel,
+          totalPerfect: this.state.perfectCount,
+          totalGood: this.state.goodCount,
+          totalMiss: this.state.missCount,
+          bestCombo: this.state.maxCombo,
+          victory: true,
+        })
+      }
+      return
+    }
 
     if (this.state.currentLevel >= getTotalLevels()) {
       setTimeout(() => this.gameOver(true), 1500)
@@ -518,10 +767,25 @@ export class GameEngine {
     this.updateClouds(dt)
     this.updateParticles(dt)
     this.updateFeedbacks(dt)
+
+    const elasticBand = updateElasticBand(this.rubberBand, dt * 0.001)
+    this.rubberBand.stretchX = elasticBand.stretchX
+    this.rubberBand.velocity = elasticBand.velocity
+    this.rubberBand.wobble = elasticBand.wobble
+
+    if (this.aiAssistant) {
+      this.aiAssistant.update(
+        { score: this.state.score, combo: this.state.combo, missCount: this.state.missCount },
+        dt
+      )
+    }
+
+    const beatInterval = 60000 / this.rhythmConfig.bpm
+    this.beatTime = Math.floor(time / beatInterval) * beatInterval
   }
 
   private updateActionTimer(dt: number) {
-    if (!this.currentLevelConfig) return
+    if (!this.currentLevelConfig && !this.currentRoutine && !this.customPattern) return
     this.state.actionTimer -= dt
     if (this.state.actionTimer <= 0) {
       this.handleMiss('超时')
@@ -620,25 +884,156 @@ export class GameEngine {
 
     if (this.currentLevelConfig) {
       drawHeightRuler(ctx, this.rubberBand.y, this.rubberBand.targetY, this.currentLevelConfig.heightLabel)
+    } else if (this.currentRoutine) {
+      drawHeightRuler(ctx, this.rubberBand.y, this.rubberBand.targetY, this.currentRoutine.heightLabel)
     }
 
-    if (this.state.phase === 'playing' && this.currentLevelConfig) {
-      const currentAction = this.currentLevelConfig.actions[this.state.actionIndex]
+    if (this.state.phase === 'playing') {
+      const currentAction = this.getCurrentAction()
       drawActionPreviewOnCanvas(ctx, currentAction ?? null, time)
     }
 
     if (this.state.phase === 'playing') {
       this.drawTimerBar(ctx)
     }
+
+    this.drawRhythmIndicator(ctx)
+    this.drawAIHint(ctx)
+    this.drawMultiplayerHUD(ctx)
+    this.drawTutorialOverlay(ctx)
+  }
+
+  private drawRhythmIndicator(ctx: CanvasRenderingContext2D) {
+    if (this.state.phase !== 'playing') return
+
+    const barW = 200
+    const barH = 6
+    const barX = (CANVAS_W - barW) / 2
+    const barY = 95
+
+    const position = getBeatPosition(performance.now(), this.rhythmConfig.bpm)
+
+    ctx.fillStyle = 'rgba(0,0,0,0.3)'
+    ctx.beginPath()
+    ctx.roundRect(barX, barY, barW, barH, 3)
+    ctx.fill()
+
+    const centerX = barX + barW / 2
+    const indicatorX = barX + barW * position
+    const distFromCenter = Math.abs(indicatorX - centerX) / (barW / 2)
+
+    const color = distFromCenter < 0.15 ? '#FFD700'
+      : distFromCenter < 0.35 ? '#4CAF50'
+      : distFromCenter < 0.6 ? '#FF9800'
+      : '#F44336'
+
+    ctx.fillStyle = color
+    ctx.beginPath()
+    ctx.arc(indicatorX, barY + barH / 2, 5, 0, Math.PI * 2)
+    ctx.fill()
+
+    ctx.strokeStyle = 'rgba(255,255,255,0.5)'
+    ctx.lineWidth = 1
+    ctx.beginPath()
+    ctx.moveTo(centerX, barY - 2)
+    ctx.lineTo(centerX, barY + barH + 2)
+    ctx.stroke()
+  }
+
+  private drawAIHint(ctx: CanvasRenderingContext2D) {
+    if (!this.aiAssistant || this.state.phase !== 'playing') return
+
+    const prediction = this.aiAssistant.predictNextAction(this.actionHistory)
+    const shouldEncourage = this.aiAssistant.shouldEncourage()
+
+    if (prediction) {
+      const actionNameMap: Record<ActionType, string> = {
+        step: '踩', hook: '勾', flick: '挑', wrap: '绕', jump: '跳',
+      }
+      ctx.save()
+      ctx.font = '14px sans-serif'
+      ctx.textAlign = 'right'
+      ctx.fillStyle = 'rgba(33,150,243,0.8)'
+      ctx.fillText(`AI建议: ${actionNameMap[prediction]}`, CANVAS_W - 20, 30)
+      ctx.restore()
+    }
+
+    if (shouldEncourage) {
+      const text = this.aiAssistant.getEncouragementText()
+      ctx.save()
+      ctx.font = '16px sans-serif'
+      ctx.textAlign = 'center'
+      ctx.fillStyle = 'rgba(255,215,0,0.9)'
+      ctx.fillText(text, CANVAS_W / 2, 50)
+      ctx.restore()
+    }
+  }
+
+  private drawMultiplayerHUD(ctx: CanvasRenderingContext2D) {
+    if (this.gameMode !== 'multiplayer' || this.players.length === 0) return
+
+    ctx.save()
+    ctx.font = '14px sans-serif'
+    ctx.textAlign = 'left'
+
+    for (let i = 0; i < this.players.length; i++) {
+      const p = this.players[i]
+      const y = 20 + i * 22
+      ctx.fillStyle = i === this.currentPlayerIndex ? p.color : 'rgba(255,255,255,0.5)'
+      const marker = i === this.currentPlayerIndex ? '▶ ' : '  '
+      ctx.fillText(`${marker}${p.name}: ${p.score}`, 15, y)
+    }
+
+    ctx.restore()
+  }
+
+  private drawTutorialOverlay(ctx: CanvasRenderingContext2D) {
+    if (this.gameMode !== 'tutorial' || !this.tutorialEngine || this.state.phase !== 'playing') return
+
+    const step = this.tutorialEngine.getCurrentStep()
+    if (!step) return
+
+    const progress = this.tutorialEngine.getOverallProgress()
+
+    ctx.save()
+
+    ctx.fillStyle = 'rgba(0,0,0,0.6)'
+    ctx.beginPath()
+    ctx.roundRect(20, CANVAS_H - 90, CANVAS_W - 40, 70, 10)
+    ctx.fill()
+
+    ctx.font = 'bold 16px sans-serif'
+    ctx.fillStyle = '#FFFFFF'
+    ctx.textAlign = 'center'
+    ctx.fillText(step.instruction, CANVAS_W / 2, CANVAS_H - 65)
+
+    if (this.tutorialEngine.showHint) {
+      ctx.font = '13px sans-serif'
+      ctx.fillStyle = 'rgba(255,255,255,0.7)'
+      ctx.fillText(step.hint, CANVAS_W / 2, CANVAS_H - 45)
+    }
+
+    ctx.fillStyle = 'rgba(255,255,255,0.2)'
+    ctx.beginPath()
+    ctx.roundRect(30, CANVAS_H - 35, CANVAS_W - 60, 8, 4)
+    ctx.fill()
+
+    ctx.fillStyle = '#4CAF50'
+    ctx.beginPath()
+    ctx.roundRect(30, CANVAS_H - 35, (CANVAS_W - 60) * progress, 8, 4)
+    ctx.fill()
+
+    ctx.restore()
   }
 
   private drawTimerBar(ctx: CanvasRenderingContext2D) {
-    if (!this.currentLevelConfig) return
+    const timePerAction = this.getTimePerAction()
+    if (timePerAction <= 0) return
     const barW = 300
     const barH = 8
     const barX = (CANVAS_W - barW) / 2
     const barY = 120
-    const ratio = Math.max(this.state.actionTimer / this.currentLevelConfig.timePerAction, 0)
+    const ratio = Math.max(this.state.actionTimer / timePerAction, 0)
 
     ctx.fillStyle = 'rgba(0,0,0,0.3)'
     ctx.beginPath()
@@ -659,20 +1054,79 @@ export class GameEngine {
   }
 
   getCurrentAction(): ActionType | null {
-    if (!this.currentLevelConfig || this.state.phase !== 'playing') return null
-    return this.currentLevelConfig.actions[this.state.actionIndex] ?? null
+    if (this.state.phase !== 'playing') return null
+    if (this.gameMode === 'routine' && this.currentRoutine) {
+      return this.currentRoutine.actions[this.state.actionIndex] ?? null
+    }
+    if (this.gameMode === 'custom' && this.customPattern) {
+      return this.customPattern.actions[this.state.actionIndex] ?? null
+    }
+    if (this.currentLevelConfig) {
+      return this.currentLevelConfig.actions[this.state.actionIndex] ?? null
+    }
+    return null
   }
 
   getActionSequence(): ActionType[] {
+    if (this.gameMode === 'routine' && this.currentRoutine) {
+      return this.currentRoutine.actions
+    }
+    if (this.gameMode === 'custom' && this.customPattern) {
+      return this.customPattern.actions
+    }
     return this.currentLevelConfig?.actions ?? []
   }
 
   getActionTimerRatio(): number {
-    if (!this.currentLevelConfig) return 1
-    return Math.max(this.state.actionTimer / this.currentLevelConfig.timePerAction, 0)
+    const timePerAction = this.getTimePerAction()
+    if (timePerAction <= 0) return 1
+    return Math.max(this.state.actionTimer / timePerAction, 0)
   }
 
   setTouchActionHandler(handler: (action: ActionType) => void) {
     this.touchActionHandler = handler
+  }
+
+  private getTimePerAction(): number {
+    if (this.gameMode === 'routine' && this.currentRoutine) {
+      return this.currentRoutine.timePerAction
+    }
+    if (this.gameMode === 'custom' && this.customPattern) {
+      return this.customPattern.timePerAction
+    }
+    return this.currentLevelConfig?.timePerAction ?? 3000
+  }
+
+  private getTotalActions(): number {
+    if (this.gameMode === 'routine' && this.currentRoutine) {
+      return this.currentRoutine.actions.length
+    }
+    if (this.gameMode === 'custom' && this.customPattern) {
+      return this.customPattern.actions.length
+    }
+    return this.currentLevelConfig?.actions.length ?? 0
+  }
+
+  private getMaxMistakes(): number {
+    if (this.gameMode === 'routine' && this.currentRoutine) {
+      return this.currentRoutine.maxMistakes
+    }
+    if (this.gameMode === 'custom' && this.customPattern) {
+      return this.customPattern.maxMistakes
+    }
+    return this.currentLevelConfig?.maxMistakes ?? 5
+  }
+
+  private syncCurrentPlayerState() {
+    if (this.gameMode !== 'multiplayer' || this.players.length === 0) return
+    const p = this.players[this.currentPlayerIndex]
+    p.score = this.state.score
+    p.lives = this.state.lives
+    p.combo = this.state.combo
+    p.maxCombo = this.state.maxCombo
+    p.perfectCount = this.state.perfectCount
+    p.goodCount = this.state.goodCount
+    p.missCount = this.state.missCount
+    p.actionIndex = this.state.actionIndex
   }
 }

@@ -8,6 +8,10 @@ export type ActionGrade = 'perfect' | 'good' | 'miss'
 
 export type CharacterState = 'idle' | 'jumping' | 'stepping' | 'hooking' | 'flicking' | 'wrapping'
 
+export type GameMode = 'classic' | 'routine' | 'custom' | 'multiplayer' | 'tutorial' | 'competition'
+
+export type RhythmGrade = 'perfect' | 'good' | 'early' | 'late' | 'miss'
+
 export interface ActionDef {
   type: ActionType
   name: string
@@ -41,6 +45,11 @@ export interface GameState {
   difficulty: Difficulty
   lastActionTime: number
   actionTimer: number
+  gameMode: GameMode
+  currentPlayerIndex: number
+  rhythmGrade: RhythmGrade
+  bandElasticity: number
+  bandRecoilForce: number
 }
 
 export interface LevelResult {
@@ -71,6 +80,10 @@ export interface RubberBandState {
   wobble: number
   wobbleSpeed: number
   wobbleDecay: number
+  elasticity: number
+  recoilForce: number
+  stretchX: number
+  velocity: number
 }
 
 export interface CharacterRenderState {
@@ -82,6 +95,7 @@ export interface CharacterRenderState {
   jumpHeight: number
   legAngle: number
   armAngle: number
+  isAI: boolean
 }
 
 export interface Particle {
@@ -111,4 +125,100 @@ export interface ActionFeedback {
   scale: number
   text: string
   color: string
+}
+
+export interface RoutineDef {
+  id: string
+  name: string
+  description: string
+  origin: string
+  difficulty: Difficulty
+  actions: ActionType[]
+  heightLabel: string
+  rubberBandY: number
+  assistantArmAngle: number
+  timePerAction: number
+  maxMistakes: number
+  isTraditional: boolean
+}
+
+export interface CustomPattern {
+  id: string
+  name: string
+  actions: ActionType[]
+  difficulty: Difficulty
+  timePerAction: number
+  maxMistakes: number
+  createdAt: number
+  updatedAt: number
+}
+
+export interface PlayerInfo {
+  id: number
+  name: string
+  color: string
+  score: number
+  lives: number
+  combo: number
+  maxCombo: number
+  perfectCount: number
+  goodCount: number
+  missCount: number
+  actionIndex: number
+  isActive: boolean
+}
+
+export interface TutorialStep {
+  action: ActionType
+  instruction: string
+  hint: string
+  practiceRounds: number
+  completed: number
+}
+
+export interface TutorialConfig {
+  steps: TutorialStep[]
+  currentStepIndex: number
+  isPractice: boolean
+  showGuide: boolean
+}
+
+export interface CompetitionEntry {
+  rank: number
+  name: string
+  score: number
+  level: number
+  combo: number
+  date: string
+  isPlayer: boolean
+}
+
+export interface CompetitionState {
+  entries: CompetitionEntry[]
+  playerEntry: CompetitionEntry | null
+  challengeActive: boolean
+  challengeScore: number
+  challengeTimeLeft: number
+}
+
+export interface RhythmConfig {
+  bpm: number
+  windowPerfect: number
+  windowGood: number
+  windowEarly: number
+  windowLate: number
+}
+
+export interface ElasticBandConfig {
+  stiffness: number
+  damping: number
+  maxStretch: number
+  recoilSpeed: number
+}
+
+export interface HeightObstacle {
+  minHeight: number
+  maxHeight: number
+  label: string
+  requiredJumpHeight: number
 }

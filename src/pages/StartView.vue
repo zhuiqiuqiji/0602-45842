@@ -19,7 +19,43 @@
         </div>
       </div>
 
-      <div class="difficulty-section">
+      <div class="mode-section">
+        <p class="section-label">选择模式</p>
+        <div class="mode-grid">
+          <button class="mode-card" @click="goMode('classic')">
+            <span class="mode-icon">🎮</span>
+            <span class="mode-name">经典过级</span>
+            <span class="mode-desc">8关逐级挑战</span>
+          </button>
+          <button class="mode-card" @click="goMode('routine')">
+            <span class="mode-icon">📜</span>
+            <span class="mode-name">传统套路</span>
+            <span class="mode-desc">小马过河等</span>
+          </button>
+          <button class="mode-card" @click="goMode('multiplayer')">
+            <span class="mode-icon">👥</span>
+            <span class="mode-name">多人轮流</span>
+            <span class="mode-desc">2-4人对战</span>
+          </button>
+          <button class="mode-card" @click="goMode('tutorial')">
+            <span class="mode-icon">📖</span>
+            <span class="mode-name">分步教学</span>
+            <span class="mode-desc">从零学起</span>
+          </button>
+          <button class="mode-card" @click="goMode('editor')">
+            <span class="mode-icon">✏️</span>
+            <span class="mode-name">花样编辑</span>
+            <span class="mode-desc">自定义套路</span>
+          </button>
+          <button class="mode-card" @click="goMode('competition')">
+            <span class="mode-icon">🏆</span>
+            <span class="mode-name">在线比赛</span>
+            <span class="mode-desc">挑战排行</span>
+          </button>
+        </div>
+      </div>
+
+      <div v-if="selectedMode === 'classic' || selectedMode === 'routine' || selectedMode === 'multiplayer'" class="difficulty-section">
         <p class="section-label">选择难度</p>
         <div class="difficulty-options">
           <button
@@ -37,6 +73,38 @@
         </div>
       </div>
 
+      <div v-if="selectedMode === 'routine'" class="routine-section">
+        <p class="section-label">选择套路</p>
+        <div class="routine-grid">
+          <button
+            v-for="r in routineList"
+            :key="r.id"
+            class="routine-card"
+            :class="{ selected: selectedRoutine === r.id }"
+            @click="selectedRoutine = r.id"
+          >
+            <span class="routine-name">{{ r.name }}</span>
+            <span class="routine-origin">{{ r.origin }}</span>
+            <span class="routine-height">{{ r.heightLabel }}</span>
+          </button>
+        </div>
+      </div>
+
+      <div v-if="selectedMode === 'multiplayer'" class="multiplayer-section">
+        <p class="section-label">玩家人数</p>
+        <div class="player-options">
+          <button
+            v-for="n in [2, 3, 4]"
+            :key="n"
+            class="player-btn"
+            :class="{ selected: playerCount === n }"
+            @click="playerCount = n"
+          >
+            {{ n }}人
+          </button>
+        </div>
+      </div>
+
       <div class="controls-section">
         <p class="section-label">操作说明</p>
         <div class="controls-grid">
@@ -48,7 +116,7 @@
         </div>
       </div>
 
-      <button class="start-btn" @click="startGame">
+      <button v-if="selectedMode === 'classic' || selectedMode === 'routine' || selectedMode === 'multiplayer'" class="start-btn" @click="startGame">
         <span class="btn-text">开始游戏</span>
         <span class="btn-arrow">→</span>
       </button>
@@ -64,13 +132,18 @@
 import { ref, onMounted, watch } from 'vue'
 import type { Difficulty } from '@/types/game'
 import { ACTION_DEFS } from '@/game/actions'
+import { getRoutineList } from '@/game/routines'
 import { useStorage } from '@/composables/useStorage'
 import { useRouter } from 'vue-router'
 
 const router = useRouter()
 const selectedDifficulty = ref<Difficulty>('normal')
+const selectedMode = ref<string>('classic')
+const selectedRoutine = ref<string>('xiaoma-guohe')
+const playerCount = ref(2)
 const { getBestScore } = useStorage()
 const bestScore = ref(0)
+const routineList = getRoutineList()
 
 const difficulties = [
   { value: 'easy' as Difficulty, name: '简单', icon: '🌟', desc: '宽松时限', color: '#4CAF50' },
@@ -86,8 +159,29 @@ const actionList = [
   { ...ACTION_DEFS.jump, keyLabel: '空格', color: ACTION_DEFS.jump.color },
 ]
 
+function goMode(mode: string) {
+  selectedMode.value = mode
+  if (mode === 'tutorial') {
+    router.push({ name: 'tutorial' })
+  } else if (mode === 'editor') {
+    router.push({ name: 'editor' })
+  } else if (mode === 'competition') {
+    router.push({ name: 'competition' })
+  }
+}
+
 function startGame() {
-  router.push({ name: 'game', query: { difficulty: selectedDifficulty.value } })
+  const mode = selectedMode.value
+  const query: Record<string, string> = {
+    difficulty: selectedDifficulty.value,
+    mode,
+  }
+  if (mode === 'routine') {
+    query.routine = selectedRoutine.value
+  } else if (mode === 'multiplayer') {
+    query.players = String(playerCount.value)
+  }
+  router.push({ name: 'game', query })
 }
 
 onMounted(() => {
@@ -105,7 +199,6 @@ watch(selectedDifficulty, (val) => {
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
   background: linear-gradient(135deg, #87CEEB 0%, #B8E4F9 40%, #FFF8E7 70%, #C8E6C9 100%);
   position: relative;
   overflow: hidden;
@@ -151,8 +244,8 @@ watch(selectedDifficulty, (val) => {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 28px;
-  max-width: 560px;
+  gap: 24px;
+  max-width: 640px;
   width: 100%;
 }
 
@@ -224,6 +317,51 @@ watch(selectedDifficulty, (val) => {
   letter-spacing: 2px;
 }
 
+.mode-section {
+  width: 100%;
+}
+
+.mode-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+}
+
+.mode-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 16px 12px;
+  border: 2px solid rgba(255,255,255,0.6);
+  border-radius: 16px;
+  background: rgba(255,255,255,0.7);
+  cursor: pointer;
+  transition: all 0.3s ease;
+  backdrop-filter: blur(4px);
+}
+
+.mode-card:hover {
+  background: rgba(255,255,255,0.95);
+  transform: translateY(-3px);
+  box-shadow: 0 6px 20px rgba(0,0,0,0.12);
+}
+
+.mode-icon {
+  font-size: 28px;
+}
+
+.mode-name {
+  font-size: 14px;
+  font-weight: 800;
+  color: #333;
+}
+
+.mode-desc {
+  font-size: 11px;
+  color: #888;
+}
+
 .difficulty-section {
   width: 100%;
 }
@@ -265,6 +403,88 @@ watch(selectedDifficulty, (val) => {
 .diff-icon { font-size: 24px; }
 .diff-name { font-size: 15px; font-weight: 800; color: #333; }
 .diff-desc { font-size: 11px; color: #888; }
+
+.routine-section {
+  width: 100%;
+}
+
+.routine-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+}
+
+.routine-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  padding: 10px 8px;
+  border: 2px solid transparent;
+  border-radius: 12px;
+  background: rgba(255,255,255,0.6);
+  cursor: pointer;
+  transition: all 0.3s ease;
+}
+
+.routine-card:hover {
+  background: rgba(255,255,255,0.85);
+}
+
+.routine-card.selected {
+  border-color: #FF69B4;
+  background: rgba(255,255,255,0.9);
+  box-shadow: 0 2px 12px rgba(255,105,180,0.3);
+}
+
+.routine-name {
+  font-size: 13px;
+  font-weight: 800;
+  color: #333;
+}
+
+.routine-origin {
+  font-size: 10px;
+  color: #888;
+}
+
+.routine-height {
+  font-size: 10px;
+  color: #FF69B4;
+  font-weight: 600;
+}
+
+.multiplayer-section {
+  width: 100%;
+}
+
+.player-options {
+  display: flex;
+  gap: 12px;
+  justify-content: center;
+}
+
+.player-btn {
+  padding: 10px 28px;
+  border: 2px solid transparent;
+  border-radius: 12px;
+  background: rgba(255,255,255,0.7);
+  font-size: 16px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  color: #333;
+}
+
+.player-btn:hover {
+  background: rgba(255,255,255,0.9);
+}
+
+.player-btn.selected {
+  border-color: #FF6B35;
+  background: rgba(255,255,255,0.95);
+  box-shadow: 0 2px 12px rgba(255,107,53,0.3);
+}
 
 .controls-section {
   width: 100%;
