@@ -41,6 +41,7 @@ import {
   updateElasticBand,
   judgeRhythm,
   getBeatPosition,
+  getClosestBeatTime,
   DEFAULT_RHYTHM_CONFIG,
   getHeightObstacle,
   checkJumpHeight,
@@ -123,6 +124,8 @@ export class GameEngine {
     this.clouds = this.createClouds()
     this.particles = []
     this.feedbacks = []
+
+    this.aiAssistant = new AIAssistant(this.difficulty)
 
     if (this.gameMode === 'tutorial') {
       this.setupTutorial()
@@ -275,13 +278,44 @@ export class GameEngine {
     this.gameMode = 'tutorial'
     this.state.gameMode = 'tutorial'
     this.tutorialEngine = new TutorialEngine()
-    this.aiAssistant = new AIAssistant(this.difficulty)
+    if (!this.aiAssistant) {
+      this.aiAssistant = new AIAssistant(this.difficulty)
+    }
   }
 
   setupCompetition() {
     this.gameMode = 'competition'
     this.state.gameMode = 'competition'
-    this.aiAssistant = new AIAssistant(this.difficulty)
+    if (!this.aiAssistant) {
+      this.aiAssistant = new AIAssistant(this.difficulty)
+    }
+  }
+
+  private getAssistantArmAngle(): number {
+    const baseAngle = this.currentLevelConfig?.assistantArmAngle
+      ?? this.currentRoutine?.assistantArmAngle
+      ?? -10
+    if (!this.aiAssistant) return baseAngle
+    const aiAngle = -this.aiAssistant.currentArmAngle
+    return baseAngle + (aiAngle - baseAngle) * this.aiAssistant.adaptRate
+  }
+
+  private getAIBandHeightOffset(): number {
+    if (!this.aiAssistant) return 0
+    const baseAngle = this.currentLevelConfig?.assistantArmAngle
+      ?? this.currentRoutine?.assistantArmAngle
+      ?? -10
+    const aiOffset = (-this.aiAssistant.currentArmAngle) - baseAngle
+    return aiOffset * 3 * this.aiAssistant.adaptRate
+  }
+
+  private getEffectiveRubberBand(): RubberBandState {
+    const offset = this.getAIBandHeightOffset()
+    return {
+      ...this.rubberBand,
+      y: this.rubberBand.y + offset,
+      targetY: this.rubberBand.targetY + offset,
+    }
   }
 
   switchToNextPlayer() {
@@ -330,13 +364,17 @@ export class GameEngine {
       this.pendingAction = null
     } else if (this.gameMode === 'tutorial') {
       this.setupTutorial()
+      this.state.actionTimer = 5000
+      this.state.actionIndex = 0
     } else {
       this.loadLevel(this.state.currentLevel)
     }
 
     this.state.phase = 'playing'
     this.state.lastActionTime = performance.now()
-    this.state.actionTimer = this.currentLevelConfig?.timePerAction ?? 3000
+    if (this.gameMode !== 'tutorial') {
+      this.state.actionTimer = this.currentLevelConfig?.timePerAction ?? 3000
+    }
     this.beatTime = performance.now()
     this.emitStateChange()
     this.lastTime = performance.now()
@@ -414,7 +452,10 @@ export class GameEngine {
   }
 
   private processAction(action: ActionType) {
-    if (!this.currentLevelConfig && !this.currentRoutine && !this.customPattern) return
+    if (this.gameMode !== 'tutorial'
+        && !this.currentLevelConfig
+        && !this.currentRoutine
+        && !this.customPattern) return
     if (this.pendingAction && !this.pendingAction.resolved) return
 
     let expectedAction: ActionType | undefined
@@ -422,6 +463,9 @@ export class GameEngine {
       expectedAction = this.currentRoutine.actions[this.state.actionIndex]
     } else if (this.gameMode === 'custom' && this.customPattern) {
       expectedAction = this.customPattern.actions[this.state.actionIndex]
+    } else if (this.gameMode === 'tutorial' && this.tutorialEngine) {
+      const step = this.tutorialEngine.getCurrentStep()
+      expectedAction = step?.action
     } else if (this.currentLevelConfig) {
       expectedAction = this.currentLevelConfig.actions[this.state.actionIndex]
     }
@@ -429,7 +473,7 @@ export class GameEngine {
     if (!expectedAction) return
 
     const actionTime = performance.now()
-    const closestBeat = this.beatTime > 0 ? actionTime : actionTime
+    const closestBeat = getClosestBeatTime(actionTime, this.rhythmConfig.bpm)
     const rhythmGrade = judgeRhythm(actionTime, closestBeat, this.rhythmConfig)
     this.state.rhythmGrade = rhythmGrade
 
@@ -526,10 +570,6 @@ export class GameEngine {
     })
 
     this.rubberBand.wobble = 15
-    this.state.actionIndex++
-    this.state.lastActionTime = performance.now()
-    this.state.actionTimer = timePerAction
-
     if (this.gameMode === 'tutorial' && this.tutorialEngine) {
       this.tutorialEngine.recordPractice(true)
       if (this.tutorialEngine.isStepComplete()) {
@@ -538,7 +578,16 @@ export class GameEngine {
           if (step) this.onTutorialStepComplete(step)
         }
         this.tutorialEngine.advanceStep()
+        if (this.tutorialEngine.isTutorialComplete()) {
+          this.gameOver(true)
+        }
       }
+      this.state.actionTimer = 5000
+      this.state.lastActionTime = performance.now()
+    } else {
+      this.state.actionIndex++
+      this.state.lastActionTime = performance.now()
+      this.state.actionTimer = timePerAction
     }
 
     if (this.gameMode === 'multiplayer') {
@@ -556,8 +605,11 @@ export class GameEngine {
   private handleMiss(reason?: string) {
     this.state.missCount++
     this.state.combo = 0
-    this.state.lives--
     this.pendingAction = null
+
+    if (this.gameMode !== 'tutorial') {
+      this.state.lives--
+    }
 
     this.feedbacks.push({
       grade: 'miss',
@@ -573,6 +625,9 @@ export class GameEngine {
 
     if (this.gameMode === 'tutorial' && this.tutorialEngine) {
       this.tutorialEngine.recordPractice(false)
+      this.state.actionTimer = 5000
+    } else {
+      this.state.actionTimer = this.getTimePerAction()
     }
 
     if (this.gameMode === 'multiplayer') {
@@ -580,14 +635,15 @@ export class GameEngine {
       this.switchToNextPlayer()
     }
 
-    if (this.state.lives <= 0) {
-      this.gameOver(false)
-    } else if (this.state.missCount >= this.getMaxMistakes()) {
-      this.gameOver(false)
+    if (this.gameMode !== 'tutorial') {
+      if (this.state.lives <= 0) {
+        this.gameOver(false)
+      } else if (this.state.missCount >= this.getMaxMistakes()) {
+        this.gameOver(false)
+      }
     }
 
     this.state.lastActionTime = performance.now()
-    this.state.actionTimer = this.getTimePerAction()
     this.emitStateChange()
   }
 
@@ -785,7 +841,10 @@ export class GameEngine {
   }
 
   private updateActionTimer(dt: number) {
-    if (!this.currentLevelConfig && !this.currentRoutine && !this.customPattern) return
+    if (this.gameMode !== 'tutorial'
+        && !this.currentLevelConfig
+        && !this.currentRoutine
+        && !this.customPattern) return
     this.state.actionTimer -= dt
     if (this.state.actionTimer <= 0) {
       this.handleMiss('超时')
@@ -799,9 +858,10 @@ export class GameEngine {
 
       if (this.pendingAction && !this.pendingAction.resolved) {
         const currentTime = performance.now()
+        const effectiveBand = this.getEffectiveRubberBand()
         const collision = checkFootRubberBandCollision(
           this.player,
-          this.rubberBand,
+          effectiveBand,
           this.pendingAction.action,
           currentTime
         )
@@ -870,22 +930,25 @@ export class GameEngine {
 
     drawBackground(ctx, time, this.clouds)
 
-    const leftHand = drawAssistant(ctx, this.leftAssistant, this.currentLevelConfig?.assistantArmAngle ?? -10, this.rubberBand.y)
-    const rightHand = drawAssistant(ctx, this.rightAssistant, this.currentLevelConfig?.assistantArmAngle ?? -10, this.rubberBand.y)
+    const armAngle = this.getAssistantArmAngle()
+    const effectiveBand = this.getEffectiveRubberBand()
+
+    const leftHand = drawAssistant(ctx, this.leftAssistant, armAngle, effectiveBand.y)
+    const rightHand = drawAssistant(ctx, this.rightAssistant, armAngle, effectiveBand.y)
 
     this.rubberBand.leftX = leftHand.handX
     this.rubberBand.rightX = rightHand.handX
 
-    drawRubberBand(ctx, this.rubberBand, time)
+    drawRubberBand(ctx, effectiveBand, time)
 
     drawPlayer(ctx, this.player, time)
     drawParticles(ctx, this.particles)
     drawActionFeedback(ctx, this.feedbacks)
 
     if (this.currentLevelConfig) {
-      drawHeightRuler(ctx, this.rubberBand.y, this.rubberBand.targetY, this.currentLevelConfig.heightLabel)
+      drawHeightRuler(ctx, effectiveBand.y, effectiveBand.targetY, this.currentLevelConfig.heightLabel)
     } else if (this.currentRoutine) {
-      drawHeightRuler(ctx, this.rubberBand.y, this.rubberBand.targetY, this.currentRoutine.heightLabel)
+      drawHeightRuler(ctx, effectiveBand.y, effectiveBand.targetY, this.currentRoutine.heightLabel)
     }
 
     if (this.state.phase === 'playing') {
@@ -1055,6 +1118,9 @@ export class GameEngine {
 
   getCurrentAction(): ActionType | null {
     if (this.state.phase !== 'playing') return null
+    if (this.gameMode === 'tutorial' && this.tutorialEngine) {
+      return this.tutorialEngine.getCurrentStep()?.action ?? null
+    }
     if (this.gameMode === 'routine' && this.currentRoutine) {
       return this.currentRoutine.actions[this.state.actionIndex] ?? null
     }
@@ -1068,6 +1134,10 @@ export class GameEngine {
   }
 
   getActionSequence(): ActionType[] {
+    if (this.gameMode === 'tutorial' && this.tutorialEngine) {
+      const step = this.tutorialEngine.getCurrentStep()
+      return step ? [step.action] : []
+    }
     if (this.gameMode === 'routine' && this.currentRoutine) {
       return this.currentRoutine.actions
     }
@@ -1088,6 +1158,7 @@ export class GameEngine {
   }
 
   private getTimePerAction(): number {
+    if (this.gameMode === 'tutorial') return 5000
     if (this.gameMode === 'routine' && this.currentRoutine) {
       return this.currentRoutine.timePerAction
     }
@@ -1098,6 +1169,7 @@ export class GameEngine {
   }
 
   private getTotalActions(): number {
+    if (this.gameMode === 'tutorial') return 0
     if (this.gameMode === 'routine' && this.currentRoutine) {
       return this.currentRoutine.actions.length
     }
@@ -1108,6 +1180,7 @@ export class GameEngine {
   }
 
   private getMaxMistakes(): number {
+    if (this.gameMode === 'tutorial') return 999
     if (this.gameMode === 'routine' && this.currentRoutine) {
       return this.currentRoutine.maxMistakes
     }
